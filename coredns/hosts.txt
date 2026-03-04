@@ -1,1 +1,1 @@
-192.168.1.133 axm.local superadmin.local vnhost.local
+10.10.10.68 axm.local superadmin.local vnhost.local commnode.local
