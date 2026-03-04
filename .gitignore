@@ -1,5 +1,1 @@
-# Binaries (download from releases, don't commit)
-*.exe
-*.tgz
-*.tar.gz
-*.zip
+# No exclusions - all files committed including binaries
