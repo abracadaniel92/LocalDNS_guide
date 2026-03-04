@@ -1,0 +1,5 @@
+# Binaries (download from releases, don't commit)
+*.exe
+*.tgz
+*.tar.gz
+*.zip

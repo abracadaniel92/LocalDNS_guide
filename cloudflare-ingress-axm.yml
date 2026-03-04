@@ -1,0 +1,22 @@
+# Add these ingress entries to your Cloudflare Tunnel config (e.g. a dedicated
+# tunnel for this Windows machine, or merge into existing config if tunnel runs here).
+#
+# AXM Demo site is bound to port 8080.
+#   service: http://localhost:8080
+#
+# Prerequisites:
+# - cloudflared installed on this Windows PC
+# - Tunnel created in Cloudflare Zero Trust dashboard; credentials in e.g. %USERPROFILE%\.cloudflared\
+# - DNS in Cloudflare: app.axm.gmojsoski.com, admin.axm.gmojsoski.com, vnhost.axm.gmojsoski.com
+#   each CNAME to <tunnel-id>.cfargotunnel.com
+
+  # AXM (IIS reverse proxy on this Windows machine, site on port 8080)
+  - hostname: app.axm.gmojsoski.com
+    service: http://localhost:8080
+  - hostname: admin.axm.gmojsoski.com
+    service: http://localhost:8080
+  - hostname: vnhost.axm.gmojsoski.com
+    service: http://localhost:8080
+
+  # Catch-all must remain last if this is merged into a full config:
+  # - service: http_status:404

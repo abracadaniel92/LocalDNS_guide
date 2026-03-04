@@ -1,0 +1,7 @@
+# AXM – add to %SystemRoot%\System32\drivers\etc\hosts (admin rights required)
+# Replace 127.0.0.1 with this PC’s LAN IP (e.g. 192.168.1.100) for access from other devices on LAN.
+
+127.0.0.1    axm.gmojsoski.com
+127.0.0.1    app.axm.gmojsoski.com
+127.0.0.1    admin.axm.gmojsoski.com
+127.0.0.1    vnhost.axm.gmojsoski.com

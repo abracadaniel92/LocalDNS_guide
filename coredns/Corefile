@@ -1,0 +1,8 @@
+# Port 53 requires running PowerShell as Administrator.
+.:53 {
+    hosts hosts.txt {
+        fallthrough
+    }
+    forward . 8.8.8.8 8.8.4.4
+    log
+}
