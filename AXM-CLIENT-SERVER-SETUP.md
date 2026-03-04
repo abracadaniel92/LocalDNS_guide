@@ -728,8 +728,6 @@ If you get the **nginx default page** or "Welcome to nginx": the proxy is not us
 
 1. Open `http://axm.DOMAIN:PROXY_PORT`.
 2. Click **Get started** (or the login button).
-3. You should be redirected to `http://superadmin.DOMAIN:PROXY_PORT/login?...`.
-4. After logging in, you should return to `http://axm.DOMAIN:PROXY_PORT`.
 
 If clicking "Get started" does nothing (no redirect):
 - Check `environment.json` (section 6.2): `authApiUrl` must point to `http://superadmin.DOMAIN:PROXY_PORT`.
