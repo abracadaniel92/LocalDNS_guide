@@ -1,453 +1,478 @@
 # AXM Client-Server Environment Setup Guide
 
-Comprehensive guide for deploying AXM (Platform, SuperAdmin, VnHost, CommNode) on a Windows server and making it accessible to LAN clients by hostname through a reverse proxy. Written for SimonsVoss engineers deploying at client sites and for client IT administrators.
+Comprehensive guide for deploying AXM on a Windows server and making it accessible to LAN clients by hostname through a reverse proxy. Written for SimonsVoss engineers deploying at client sites and for client IT administrators.
 
 ---
 
 ## Table of contents
 
-1. [Overview and architecture](#1-overview-and-architecture)
-2. [Prerequisites](#2-prerequisites)
-3. [Choosing hostnames](#3-choosing-hostnames)
-4. [DNS configuration](#4-dns-configuration)
-5. [Reverse proxy setup](#5-reverse-proxy-setup)
-6. [AXM bundle configuration for proxy access](#6-axm-bundle-configuration-for-proxy-access)
-7. [Windows Firewall](#7-windows-firewall)
-8. [Starting the services](#8-starting-the-services)
-9. [Client device setup](#9-client-device-setup)
-10. [Verification and testing](#10-verification-and-testing)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Running as Windows services](#12-running-as-windows-services)
-13. [Summary checklist](#13-summary-checklist)
+1. [Introduction](#1-introduction)
+2. [Understanding the AXM bundle](#2-understanding-the-axm-bundle)
+3. [Architecture overview](#3-architecture-overview)
+4. [Prerequisites](#4-prerequisites)
+5. [Planning](#5-planning)
+6. [DNS configuration](#6-dns-configuration)
+7. [Reverse proxy requirements](#7-reverse-proxy-requirements)
+8. [AXM bundle configuration for proxy access](#8-axm-bundle-configuration-for-proxy-access)
+9. [Windows Firewall](#9-windows-firewall)
+10. [Starting and verifying](#10-starting-and-verifying)
+11. [Client device setup](#11-client-device-setup)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Deployment checklist](#13-deployment-checklist)
 
 ---
 
-## 1. Overview and architecture
+## 1. Introduction
 
-### What this guide covers
+### Purpose and audience
 
-AXM runs several backend applications on a single Windows PC (the "server"). Each application listens on its own port (e.g. 50000, 50001). Accessing `http://serverip:50000` works locally, but is not practical for end users or multiple client devices.
+AXM runs several backend applications on a single Windows PC (the "server"). Each application listens on its own port (e.g. 50000, 50001). Accessing `http://serverip:50000` works on the server itself, but is not practical for end users or multiple client devices on the network.
 
 This guide sets up:
 
-- **DNS** so that friendly hostnames (e.g. `axm.DOMAIN`, `superadmin.DOMAIN`) resolve to the server.
-- **A reverse proxy** that listens on one port (e.g. 8080) and routes requests by hostname to the correct backend.
+- **DNS** so that friendly hostnames resolve to the server.
+- **A reverse proxy** that listens on one port and routes requests by hostname to the correct backend.
 - **AXM configuration** so that login, CORS, and redirect flows work through the proxy.
 
 After setup, users open `http://axm.DOMAIN:PROXY_PORT` in a browser and everything works transparently.
 
-### Architecture
+This guide is **tool-agnostic**. It describes the requirements each component must meet rather than prescribing a specific product. Use whichever reverse proxy and DNS solution fits your environment.
+
+### Placeholder reference
+
+The following placeholders are used throughout this guide. **Replace them with your actual values** everywhere they appear.
+
+| Placeholder | Meaning | Example |
+|-------------|---------|---------|
+| `DOMAIN` | The domain suffix for your hostnames | `lan`, `local`, `company.internal` |
+| `SERVER_IP` | The server's static LAN IPv4 address | `192.168.1.100` |
+| `PROXY_PORT` | The port the reverse proxy listens on | `8080` |
+| `PLATFORM_PORT` | Port for AXM Platform (check `data.json`) | `50000` |
+| `SUPERADMIN_PORT` | Port for SuperAdmin (check `data.json`) | `50001` |
+| `VNHOST_PORT` | Port for VnHost (check `data.json`) | `50002` |
+| `COMMNODE_PORT` | Port for CommNode (check `data.json`) | `60123` |
+
+---
+
+## 2. Understanding the AXM bundle
+
+Before configuring anything, it is important to understand what the AXM bundle contains and how it is structured. This section describes the bundle layout, the role of each application, and where configuration lives.
+
+### 2.1 Bundle folder structure
+
+The AXM bundle is a self-contained folder. Its top-level layout:
+
+```
+AXM-Bundle/
+├── data.json            # Bundle config: edition, ports, OpenID clients
+├── backend/
+│   ├── axm.platform/          # Platform (main web application)
+│   ├── axm.superadmin/        # SuperAdmin (authentication + admin)
+│   ├── axm.vnhost/            # VnHost (virtual network host)
+│   ├── axm.commnode/          # CommNode (communication node)
+│   └── axm.virtualcommnode/   # Virtual CommNode
+└── logs/
+    ├── axm.platform/
+    ├── axm.superadmin/
+    ├── axm.commnode/
+    ├── axm.virtualcommnode/
+    └── axm.vnhost/
+```
+
+The launcher executable is separate from this folder. It reads `data.json` to find and start each application.
+
+### 2.2 Application roles and default ports
+
+| Application | Default port | Role |
+|-------------|-------------|------|
+| **Platform** (`axm.platform`) | 50000 | The main web application that end users interact with. Serves an Angular SPA and backend APIs. |
+| **SuperAdmin** (`axm.superadmin`) | 50001 | Authentication server (OpenID Connect via OpenIddict) and administration interface. All login and token flows go through SuperAdmin. |
+| **VnHost** (`axm.vnhost`) | 50002 | Virtual Network Host server for lock communication. |
+| **CommNode** (`axm.commnode`) | 60123 | Communication node for device communication. |
+| **VirtualCommNode** (`axm.virtualcommnode`) | 60124 | Virtual communication node. |
+
+Ports are defined in `data.json` at the bundle root. **Always check this file for actual values**; they may differ per installation.
+
+### 2.3 Key configuration files
+
+Each backend application has its own configuration files. The following are the ones relevant to reverse proxy and network setup.
+
+**Bundle root:**
+
+| File | Purpose |
+|------|---------|
+| `data.json` | Edition, environment, application list, ports, and OpenID client definitions (including `redirectUris`). |
+
+**Platform** (`backend/axm.platform/`):
+
+| File | Purpose |
+|------|---------|
+| `appsettings.json` | Base configuration. |
+| `appsettings.{Edition}.json` | Edition-specific settings (e.g. `appsettings.Plus.json`). Contains `AxmAuthentication.Authority` and `SUP.BaseUrl` which control where the "Get started" button redirects. |
+| `appsettings.Development.json` | Development/override settings. Contains `AllowedHosts`. |
+| `wwwroot/environments/environment.json` | SPA configuration: `apiUrl`, `authApiUrl`, `apiVnHost`. The Angular frontend uses these URLs for all API calls. |
+
+**SuperAdmin** (`backend/axm.superadmin/`):
+
+| File | Purpose |
+|------|---------|
+| `appsettings.json` | Base configuration. |
+| `appsettings.Development.json` | Contains CORS `AllowedOrigins`, OpenIddict `RedirectUris` and `PostLogoutRedirectUris`, and `AllowedHosts`. |
+| `wwwroot/web/environments/environment.json` | SPA configuration: `apiUrl`, `authApiUrl`, `axManagerUrl`. |
+
+### 2.4 Startup order and dependencies
+
+`data.json` defines the startup order by priority:
+
+1. **SuperAdmin** (priority 100) — starts first; all other apps depend on it for authentication.
+2. **Platform** (priority 200) — depends on SuperAdmin.
+3. **CommNode**, **VirtualCommNode**, **VnHost** (priority 300) — depend on both SuperAdmin and Platform.
+
+Always start SuperAdmin before Platform, and Platform before the remaining services.
+
+---
+
+## 3. Architecture overview
+
+### Network flow
 
 ```
 Client browser
     |
-    |  http://axm.DOMAIN:8080
+    |  http://axm.DOMAIN:PROXY_PORT
     v
 [DNS resolution]  axm.DOMAIN --> SERVER_IP
     |
     v
-[Reverse proxy on SERVER_IP:8080]
+[Reverse proxy on SERVER_IP:PROXY_PORT]
     |  Routes by Host header:
-    |    axm.DOMAIN        --> http://127.0.0.1:50000   (Platform)
-    |    superadmin.DOMAIN  --> http://127.0.0.1:50001   (SuperAdmin)
-    |    vnhost.DOMAIN      --> http://127.0.0.1:50002   (VnHost)
-    |    commnode.DOMAIN     --> http://127.0.0.1:COMMNODE_PORT (CommNode)
+    |    axm.DOMAIN         --> http://127.0.0.1:PLATFORM_PORT    (Platform)
+    |    superadmin.DOMAIN   --> http://127.0.0.1:SUPERADMIN_PORT  (SuperAdmin)
+    |    vnhost.DOMAIN       --> http://127.0.0.1:VNHOST_PORT      (VnHost)
+    |    commnode.DOMAIN     --> http://127.0.0.1:COMMNODE_PORT    (CommNode)
     v
 [AXM backend applications on localhost]
 ```
 
-### Standard port mapping
+All client traffic enters through the reverse proxy on a single port. The proxy inspects the `Host` header and forwards the request to the correct backend. Clients never connect directly to the backend ports.
 
-Ports are defined in `data.json` at the root of the AXM bundle. Check this file for actual values; they may differ per installation.
+### Authentication flow
 
-| Application | Default port | Hostname (example) |
-|-------------|-------------|-------------------|
-| **Platform** | 50000 | `axm.DOMAIN` |
-| **SuperAdmin** | 50001 | `superadmin.DOMAIN` |
-| **VnHost** | 50002 | `vnhost.DOMAIN` |
-| **CommNode** | varies (check `data.json`) | `commnode.DOMAIN` |
+Understanding the authentication flow is critical for configuring AXM behind a proxy. When a user clicks "Get started" on the Platform, the following redirect chain occurs:
 
-> **Throughout this guide**, replace `DOMAIN` with your chosen domain suffix (e.g. `local`, `lan`, `company.com`), `SERVER_IP` with the server's LAN IPv4 address, and `PROXY_PORT` with the port the proxy listens on (e.g. `8080`). Replace backend ports if yours differ from the defaults above.
+```
+1. User opens http://axm.DOMAIN:PROXY_PORT
+   -> Platform SPA loads in the browser
+
+2. User clicks "Get started"
+   -> Browser redirects to:
+      http://superadmin.DOMAIN:PROXY_PORT/login?ReturnUrl=/api/v1/connect/authorize?
+        client_id=axm.superadmin.webapp
+        &redirect_uri=http://axm.DOMAIN:PROXY_PORT
+        &response_type=code
+        &scope=openid profile offline_access
+        ...
+
+3. User enters credentials on the SuperAdmin login page
+
+4. SuperAdmin validates credentials and redirects back to:
+   http://axm.DOMAIN:PROXY_PORT (the redirect_uri from step 2)
+   with an authorization code
+
+5. Platform exchanges the code for tokens with SuperAdmin (server-to-server)
+```
+
+This flow depends on several settings being consistent:
+
+| What controls it | Setting | Must point to |
+|-----------------|---------|---------------|
+| Where "Get started" redirects | Platform `appsettings.{Edition}.json` → `AxmAuthentication.Authority` | `http://superadmin.DOMAIN:PROXY_PORT` |
+| Where the SPA sends auth requests | Platform `environment.json` → `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
+| Which redirect URIs are accepted | SuperAdmin `appsettings.Development.json` → OpenIddict `RedirectUris` | Must include `http://axm.DOMAIN:PROXY_PORT` |
+| Which origins are allowed (CORS) | SuperAdmin `appsettings.Development.json` → `Cors.AllowedOrigins` | Must include `http://axm.DOMAIN:PROXY_PORT` |
+
+If any of these do not match, the login flow will break — the redirect will go to the wrong URL, the redirect URI will be rejected, or the browser will block the request due to CORS.
 
 ### Component roles
 
 | Component | Role |
 |-----------|------|
-| **DNS** | Resolves hostnames to the server IP. Can be a hosts file, a local DNS server (CoreDNS), Active Directory DNS, router DNS, or any other DNS solution. |
-| **Reverse proxy** | Accepts HTTP on one port, inspects the `Host` header, and forwards to the correct backend. Can be nginx, IIS with ARR, Apache, Caddy, Traefik, or any HTTP proxy. |
+| **DNS** | Resolves hostnames to the server IP. Can be a hosts file, the client's existing DNS infrastructure (Active Directory, router DNS), or a dedicated DNS server. |
+| **Reverse proxy** | Accepts HTTP on one port, inspects the `Host` header, and forwards to the correct backend. Can be any HTTP reverse proxy that supports host-based routing, forwarded headers, and WebSockets. |
 | **AXM backends** | The actual applications (Kestrel/.NET). Each listens on `localhost` on its own port. They are not exposed directly to the network; the proxy handles external access. |
 
 ---
 
-## 2. Prerequisites
+## 4. Prerequisites
 
 Before starting, ensure the following:
 
 - **Windows 10/11 or Windows Server** on the machine that will run AXM.
-- **AXM bundle** installed. You should have a folder containing `data.json` and a `backend/` directory with the application folders.
-- **Administrator access** on the server (needed for DNS on port 53, firewall rules, and hosts file edits).
+- **AXM bundle installed.** You should have a folder containing `data.json` and a `backend/` directory with the application folders.
+- **Administrator access** on the server (needed for firewall rules, DNS on port 53 if using a DNS server, and hosts file edits).
 - **Static or reserved LAN IP** on the server. If the server gets its IP via DHCP, create a **DHCP reservation** in the router/DHCP server so the IP does not change. DNS entries and client hosts files depend on a stable IP.
-- **Chosen hostnames** for each application (see section 3).
-- **A reverse proxy** installed (nginx, IIS with ARR, or another proxy of your choice).
-- **Ports confirmed**: open `data.json` and note the port for each application. The guide uses `50000`, `50001`, `50002` as examples.
+- **Chosen hostnames** for each application (see section 5).
+- **A reverse proxy** installed that meets the requirements in section 7.
+- **Ports confirmed:** open `data.json` and note the port for each application.
 
 ---
 
-## 3. Choosing hostnames
+## 5. Planning
+
+### 5.1 Choosing hostnames
 
 Each AXM application gets its own hostname. All hostnames point to the same server IP; the reverse proxy uses the `Host` header to route to the correct backend.
 
-### Naming conventions
+**Naming conventions:**
 
 | Style | Example | When to use |
 |-------|---------|-------------|
-| `.local` suffix | `axm.local`, `superadmin.local`, `vnhost.local` | Quick demos, isolated labs. Note: `.local` may conflict with mDNS/Bonjour on some networks. |
-| `.lan` suffix | `axm.lan`, `superadmin.lan`, `vnhost.lan` | Internal networks. `.lan` is not a reserved TLD, so it avoids mDNS conflicts. |
-| Subdomain of a real domain | `axm.company.com`, `superadmin.company.com` | Production environments where DNS is centrally managed (e.g. Active Directory). |
-| `.internal` suffix | `axm.internal`, `superadmin.internal` | RFC-reserved for private use; safe from public DNS collisions. |
+| `.lan` suffix | `axm.lan`, `superadmin.lan` | Internal networks. `.lan` is not a reserved TLD, avoids mDNS conflicts. |
+| `.internal` suffix | `axm.internal`, `superadmin.internal` | RFC 6762 reserves `.internal` for private use; safe from public DNS collisions. |
+| `.local` suffix | `axm.local`, `superadmin.local` | Quick demos, isolated labs. Note: `.local` may conflict with mDNS/Bonjour on some networks. |
+| Subdomain of a real domain | `axm.company.com`, `superadmin.company.com` | Production environments with centrally managed DNS (e.g. Active Directory). |
 
-### Rules
+**Rules:**
 
 1. **One hostname per application.** Platform, SuperAdmin, VnHost (and CommNode if used) each need a distinct hostname.
 2. **All hostnames resolve to the same server IP.** The proxy distinguishes them by the `Host` header, not by IP.
-3. **Pick a proxy port** (e.g. `8080`). All hostnames share this port. Avoid port 80 if another service (e.g. IIS, Apache, or the Windows HTTP.sys driver) already uses it.
+3. **Pick a proxy port** (e.g. `8080`). All hostnames share this port. Avoid port 80 if another service already uses it.
 4. **Be consistent.** Use the same hostnames everywhere: DNS, proxy config, AXM config files, browser URLs.
 
-For the rest of this guide, the placeholders `axm.DOMAIN`, `superadmin.DOMAIN`, `vnhost.DOMAIN`, and `commnode.DOMAIN` are used. Replace `DOMAIN` with whatever you chose.
+### 5.2 Choosing a proxy port
+
+Choose a TCP port that is not already in use on the server. Common choices:
+
+- **8080** — common HTTP alternative port.
+- **80** — standard HTTP port (no port needed in the URL, but may conflict with existing services).
+- **443** — standard HTTPS port (requires a TLS certificate on the proxy).
+
+Check for conflicts:
+
+```powershell
+netstat -ano | findstr "LISTENING" | findstr ":8080"
+```
+
+If the port is in use, choose a different one.
+
+### 5.3 Choosing a DNS strategy
+
+| Approach | Scope | Effort | Best for |
+|----------|-------|--------|----------|
+| **Hosts file** | Per device | Low (edit one file per device) | Quick demos, 1-3 client devices |
+| **Dedicated DNS server** | All devices that point DNS to it | Medium (run a DNS server on the AXM server or another machine) | Environments without existing DNS infrastructure |
+| **Existing DNS infrastructure** | Network-wide (automatic) | Low-Medium (add A records) | Environments with Active Directory, router DNS, or similar |
 
 ---
 
-## 4. DNS configuration
+## 6. DNS configuration
 
-Clients must be able to resolve your chosen hostnames to `SERVER_IP`. There are three common approaches; choose the one that fits the environment.
+Clients must be able to resolve your chosen hostnames to `SERVER_IP`. Choose the approach that fits the environment.
 
-### Comparison
-
-| Option | Scope | Effort | Best for |
-|--------|-------|--------|----------|
-| **A. Hosts file** | Per device | Low (edit one file per device) | Quick demos, 1-3 client devices |
-| **B. CoreDNS** | All devices that point DNS to the server | Medium (run a lightweight DNS server) | Environments without existing DNS infrastructure |
-| **C. Client's own DNS** | Network-wide (automatic) | Low-Medium (add A records) | Environments with Active Directory, router DNS, Pi-hole, etc. |
-
----
-
-### Option A: Hosts file (per device)
+### 6.1 Hosts file (per device)
 
 Edit the hosts file on **each device** (including the server itself) that needs to access AXM.
 
 **Windows** (run Notepad as Administrator):
 
 1. Open `C:\Windows\System32\drivers\etc\hosts` (set file filter to "All Files").
-2. Add one line at the end:
+2. Add one line:
    ```
    SERVER_IP    axm.DOMAIN superadmin.DOMAIN vnhost.DOMAIN commnode.DOMAIN
    ```
-   Example: `192.168.1.100    axm.lan superadmin.lan vnhost.lan commnode.lan`
 3. Save and close.
 
 **Mac / Linux** (run as root or with sudo):
 
 ```bash
 sudo nano /etc/hosts
+# Add the same line, save.
 ```
 
-Add the same line, save.
+### 6.2 Network-wide DNS
 
-**Verify:**
+If the environment has existing DNS (Active Directory, Windows Server DNS, router DNS, or another DNS solution), add **A records** for each hostname pointing to `SERVER_IP`.
+
+| Hostname | Record type | Value |
+|----------|------------|-------|
+| `axm.DOMAIN` | A | `SERVER_IP` |
+| `superadmin.DOMAIN` | A | `SERVER_IP` |
+| `vnhost.DOMAIN` | A | `SERVER_IP` |
+| `commnode.DOMAIN` | A | `SERVER_IP` |
+
+If no existing DNS infrastructure is available, a lightweight DNS server can be run on the AXM server itself. It should:
+
+- Listen on UDP port 53.
+- Resolve the chosen hostnames to `SERVER_IP`.
+- Forward all other queries to an upstream DNS server (e.g. `8.8.8.8`).
+
+Client devices (or the router's DHCP settings) are then pointed to `SERVER_IP` for DNS.
+
+### 6.3 DNS verification
+
+From a client device or the server itself:
 
 ```
 ping axm.DOMAIN
 ```
 
-Should show `SERVER_IP`.
+The output should show `SERVER_IP`. If it shows a different address or "could not find host", DNS is not configured correctly.
 
----
-
-### Option B: CoreDNS (lightweight DNS server on the AXM PC)
-
-CoreDNS is a single-binary DNS server. It runs on the AXM server and resolves your hostnames; everything else is forwarded to public DNS (e.g. 8.8.8.8).
-
-**1. Download CoreDNS**
-
-- https://github.com/coredns/coredns/releases
-- Get the `windows_amd64` archive. Extract `coredns.exe` to a folder, e.g. `C:\coredns\`.
-
-**2. Create `Corefile`** in `C:\coredns\`:
+If using a dedicated DNS server:
 
 ```
-.:53 {
-    hosts hosts.txt {
-        fallthrough
-    }
-    forward . 8.8.8.8 8.8.4.4
-    log
-}
-```
-
-**3. Create `hosts.txt`** in `C:\coredns\`:
-
-```
-SERVER_IP axm.DOMAIN superadmin.DOMAIN vnhost.DOMAIN commnode.DOMAIN
-```
-
-Replace `SERVER_IP` and the hostnames with your actual values.
-
-**4. Start CoreDNS** (Administrator PowerShell):
-
-```powershell
-cd C:\coredns
-.\coredns.exe -conf Corefile
-```
-
-Port 53 requires Administrator. Leave the window open (or install as a service; see section 12).
-
-**5. Point clients to the server's DNS**
-
-On each device (or in the router's DHCP settings), set DNS to `SERVER_IP`. Then all hostnames resolve via CoreDNS.
-
-- **On the server itself:** set DNS to `127.0.0.1` (ncpa.cpl -> adapter -> IPv4 -> DNS).
-- **On other devices:** set DNS to `SERVER_IP`.
-- **Network-wide:** set the DHCP DNS option in the router to `SERVER_IP`.
-
-**Verify:**
-
-```
-nslookup axm.DOMAIN 127.0.0.1
+nslookup axm.DOMAIN SERVER_IP
 ```
 
 Should return `SERVER_IP`.
 
 ---
 
-### Option C: Client's own DNS infrastructure
+## 7. Reverse proxy requirements
 
-If the environment already has DNS (Active Directory, Windows Server DNS, router DNS, Pi-hole, Unbound, etc.), add A records for each hostname pointing to `SERVER_IP`.
+The reverse proxy sits between the client and the AXM backends. It listens on a single port, inspects the `Host` header, and forwards the request to the correct backend. This section describes the requirements any proxy must meet.
 
-**Active Directory DNS (Windows Server):**
+### 7.1 Listen on all interfaces
 
-1. Open DNS Manager (`dnsmgmt.msc`).
-2. In the appropriate forward lookup zone, create **A records**:
-   - `axm` -> `SERVER_IP`
-   - `superadmin` -> `SERVER_IP`
-   - `vnhost` -> `SERVER_IP`
-   - `commnode` -> `SERVER_IP`
-3. Clients joined to the domain will resolve these automatically.
+The proxy must listen on `0.0.0.0:PROXY_PORT` (all network interfaces), not just `127.0.0.1`. Binding to `0.0.0.0` ensures it accepts connections from other devices on the network.
 
-**Router DNS:**
+### 7.2 Route by Host header
 
-Most routers allow adding static DNS entries in the admin UI. Add the same hostname -> IP mappings. All devices using the router for DNS will resolve them.
+Each hostname maps to a different backend port on `127.0.0.1`:
 
-**Pi-hole / Unbound / dnsmasq:**
+| Incoming Host header | Forward to |
+|---------------------|------------|
+| `axm.DOMAIN` | `http://127.0.0.1:PLATFORM_PORT` |
+| `superadmin.DOMAIN` | `http://127.0.0.1:SUPERADMIN_PORT` |
+| `vnhost.DOMAIN` | `http://127.0.0.1:VNHOST_PORT` |
+| `commnode.DOMAIN` | `http://127.0.0.1:COMMNODE_PORT` |
 
-Add local DNS records or custom entries mapping each hostname to `SERVER_IP`. Consult the specific tool's documentation.
+A default/fallback rule that routes unmatched hostnames to Platform is recommended so that accessing `http://SERVER_IP:PROXY_PORT` directly still works.
 
-**General rule:** Create one **A record** per hostname, all pointing to the same `SERVER_IP`.
+### 7.3 Forwarded headers
 
----
+The proxy must set the following headers on every request so the backend knows the original client request:
 
-## 5. Reverse proxy setup
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-Forwarded-Host` | Original host and port (e.g. `axm.DOMAIN:PROXY_PORT`) | Backend uses this for redirect URLs, CORS origin checks, and OpenID Connect flows. |
+| `X-Forwarded-Proto` | `http` or `https` (the client's protocol) | Backend knows whether the client connected over HTTP or HTTPS. |
+| `X-Forwarded-For` | Client IP address | Logging and access control. |
+| `Host` | Original hostname (e.g. `axm.DOMAIN:PROXY_PORT`), or `localhost` if the backend only accepts localhost | Kestrel/ASP.NET uses this for URL generation. See note below. |
 
-### What the proxy does
+**Host header note:** By default, AXM's Kestrel server may only accept `Host: localhost`. There are two approaches:
 
-The proxy listens on a single port (e.g. 8080) on `0.0.0.0` (all interfaces). When a request arrives, it inspects the `Host` header and forwards the request to the correct AXM backend on `127.0.0.1`.
+- **Option A:** Send `Host: localhost` to the backend and set `X-Forwarded-Host` to the original hostname. The backend uses `X-Forwarded-Host` for URL generation if forwarded headers middleware is configured.
+- **Option B:** Send the original `Host` header and add all hostnames to `AllowedHosts` in the backend's `appsettings` (see section 8.7).
 
-### Key requirements (any proxy)
+### 7.4 WebSocket support
 
-Regardless of which proxy software you use, it must:
+AXM uses SignalR, which requires WebSocket connections. The proxy must:
 
-1. **Listen on a LAN-accessible port** (e.g. 8080). Binding to `0.0.0.0` ensures it accepts connections from other devices, not just localhost.
+- Forward `Upgrade` and `Connection: upgrade` headers from the client to the backend.
+- Use **HTTP/1.1** for the upstream connection (WebSockets require HTTP/1.1, not HTTP/2).
+- Not buffer or interfere with the WebSocket data stream.
 
-2. **Route by Host header.** Each hostname maps to a different backend port:
+### 7.5 Timeouts
 
-   | Incoming Host header | Forward to |
-   |---------------------|------------|
-   | `axm.DOMAIN` | `http://127.0.0.1:50000` |
-   | `superadmin.DOMAIN` | `http://127.0.0.1:50001` |
-   | `vnhost.DOMAIN` | `http://127.0.0.1:50002` |
-   | `commnode.DOMAIN` | `http://127.0.0.1:COMMNODE_PORT` |
+WebSocket connections are long-lived (they stay open for the duration of a user session). Set the read/proxy timeout to a high value (e.g. 86400 seconds / 24 hours) so the proxy does not prematurely close idle connections.
 
-3. **Forward headers** so the backend knows the original client request:
+### 7.6 Proxy verification
 
-   | Header | Value | Purpose |
-   |--------|-------|---------|
-   | `X-Forwarded-Host` | Original host and port (e.g. `axm.DOMAIN:8080`) | Backend uses this for redirect URLs, CORS, and OIDC |
-   | `X-Forwarded-Proto` | `http` or `https` | Backend knows the client's protocol |
-   | `X-Forwarded-For` | Client IP address | Logging and access control |
-   | `Host` | Original host and port (e.g. `axm.DOMAIN:8080`) | Kestrel/ASP.NET uses this for URL generation. Alternatively, send `Host: localhost` and rely on `X-Forwarded-Host` if the backend is configured for forwarded headers. |
+After configuring the proxy, verify it is running and accessible:
 
-4. **WebSocket support.** AXM uses SignalR (WebSockets). The proxy must forward `Upgrade` and `Connection` headers and use HTTP/1.1 for the upstream connection.
-
-5. **Timeouts.** WebSocket connections are long-lived. Set a high read/proxy timeout (e.g. 86400 seconds / 24 hours).
-
----
-
-### nginx example
-
-This repo includes ready-to-use nginx configs in the `nginx/` folder.
-
-**`nginx.conf`** (main config):
-
-```nginx
-worker_processes  1;
-error_log  logs/error.log;
-pid        logs/nginx.pid;
-
-events {
-    worker_connections  1024;
-}
-
-http {
-    server_names_hash_bucket_size  64;
-    map_hash_bucket_size 128;
-    default_type  application/octet-stream;
-    sendfile      on;
-    keepalive_timeout  65;
-
-    include axm.conf;
-}
+```powershell
+netstat -ano | findstr "PROXY_PORT"
 ```
 
-**`axm.conf`** (one server block per hostname):
-
-```nginx
-server {
-    listen       8080;
-    server_name  axm.DOMAIN;
-
-    location / {
-        proxy_pass http://127.0.0.1:50000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host:$server_port;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400;
-    }
-}
-
-server {
-    listen       8080;
-    server_name  superadmin.DOMAIN;
-
-    location / {
-        proxy_pass http://127.0.0.1:50001;
-        # ... same headers as above ...
-    }
-}
-
-server {
-    listen       8080;
-    server_name  vnhost.DOMAIN;
-
-    location / {
-        proxy_pass http://127.0.0.1:50002;
-        # ... same headers as above ...
-    }
-}
-
-# Repeat for commnode.DOMAIN if used.
-# Add a default_server block that proxies to Platform as a fallback.
-```
-
-**Setup steps:**
-
-1. Download nginx for Windows from https://nginx.org/en/download.html.
-2. Extract to e.g. `C:\nginx\`.
-3. Replace `C:\nginx\conf\nginx.conf` with the config above.
-4. Create `C:\nginx\conf\axm.conf` with the server blocks above (replace `DOMAIN` and ports).
-5. Test: `.\nginx.exe -t` (should say "syntax is ok").
-6. Start: `.\nginx.exe`.
+The output should show `0.0.0.0:PROXY_PORT  LISTENING`. If it shows `127.0.0.1:PROXY_PORT`, the proxy is only accessible locally; adjust the configuration to bind to all interfaces.
 
 ---
 
-### IIS example (URL Rewrite + ARR)
+## 8. AXM bundle configuration for proxy access
 
-IIS uses **URL Rewrite** and **Application Request Routing (ARR)** for reverse proxying. The equivalent of the nginx forwarded headers are **IIS Server Variables**:
+The AXM bundle must be told about the proxy URLs so that login redirects, CORS, and API calls work when accessed through the proxy. Without these changes, the "Get started" button will redirect to `localhost` instead of the proxy URL, login will fail due to unregistered redirect URIs, and cross-origin requests will be blocked.
 
-| nginx header | IIS Server Variable | Value |
-|-------------|---------------------|-------|
-| `X-Forwarded-Host` | `HTTP_X_FORWARDED_HOST` | `{HTTP_HOST}` |
-| `X-Forwarded-Proto` | `HTTP_X_FORWARDED_PROTO` | `https` (or `http`) |
-| `X-Forwarded-For` | `HTTP_X_FORWARDED_FOR` | `{REMOTE_ADDR}` |
+All paths below are relative to the **bundle root** (the folder containing `data.json`).
 
-**Setup overview:**
+### 8.1 The authentication redirect flow
 
-1. Install IIS with **WebSocket Protocol**, **URL Rewrite** (install before ARR), and **ARR**.
-2. Enable ARR proxy: IIS Manager -> server node -> Application Request Routing Cache -> Server Proxy Settings -> Enable proxy.
-3. Create a site (e.g. "AXM") with an HTTP binding on your chosen port.
-4. Add URL Rewrite rules that match by `{HTTP_HOST}` and rewrite to the backend URLs.
-5. In each rule's **Server Variables**, set the three `HTTP_X_FORWARDED_*` variables.
-6. Optionally disable "Reverse rewrite host in response headers" at server level.
+When a user clicks "Get started" on the Platform, the following happens:
 
-See `IIS-DOC-CHECKLIST.md` in this repo for a detailed comparison with the official AXM IIS documentation.
+1. The Platform SPA reads `authApiUrl` from its `environment.json` and redirects the browser to the SuperAdmin login page at that URL.
 
----
+2. The redirect URL includes OpenID Connect parameters:
+   ```
+   http://superadmin.DOMAIN:PROXY_PORT/login?ReturnUrl=/api/v1/connect/authorize?
+       client_id=axm.superadmin.webapp
+       &redirect_uri=http://axm.DOMAIN:PROXY_PORT
+       &response_type=code
+       &scope=openid profile offline_access
+       &code_challenge=...
+       &code_challenge_method=S256
+   ```
 
-### Other proxies (Apache, Caddy, Traefik)
+3. The user enters credentials. SuperAdmin validates them and checks:
+   - Is `http://axm.DOMAIN:PROXY_PORT` a **registered redirect URI** for client `axm.superadmin.webapp`? (Checked against OpenIddict `RedirectUris` in SuperAdmin's `appsettings.Development.json`.)
+   - Is the request origin allowed by **CORS**? (Checked against `AllowedOrigins` in the same file.)
 
-The same principles apply to any HTTP reverse proxy:
+4. If both checks pass, SuperAdmin redirects the browser back to `http://axm.DOMAIN:PROXY_PORT` with an authorization code.
 
-- **Apache:** Use `mod_proxy` with `ProxyPass` and `ProxyPassReverse`. Set `RequestHeader` for forwarded headers. Enable `mod_proxy_wstunnel` for WebSockets.
-- **Caddy:** Use `reverse_proxy` directive with `header_up` for forwarded headers. WebSocket support is automatic.
-- **Traefik:** Define routers with `Host()` rules and services pointing to the backend ports. Forwarded headers are handled automatically.
+5. The Platform SPA exchanges the code for tokens by calling SuperAdmin's token endpoint.
 
-The key is always the same: route by `Host`, forward headers, support WebSockets.
+**If any URL in this chain does not match the proxy URL, the flow breaks.** This is why every configuration change in this section matters.
 
----
-
-## 6. AXM bundle configuration for proxy access
-
-The AXM bundle must be told about the proxy URLs so that login redirects, CORS, and API calls work when accessed through the proxy. All paths below are relative to the **bundle root** (the folder containing `data.json`).
-
-### 6.1 data.json (OpenID redirect URIs)
+### 8.2 data.json (OpenID redirect URIs)
 
 **File:** `data.json`
 **Section:** `openIdApplications`
 
-Add the proxy URLs to `redirectUris` so login/redirect flows accept them:
+Add the proxy URLs to `redirectUris` so the OpenID Connect flow accepts them:
 
 ```json
 "axm.webapp": {
     "redirectUris": [
-        "http://localhost:50000",
+        "http://localhost:PLATFORM_PORT",
         "http://axm.DOMAIN:PROXY_PORT",
         ...existing entries...
     ]
 },
 "axm.superadmin.webapp": {
     "redirectUris": [
-        "http://localhost:50001",
+        "http://localhost:SUPERADMIN_PORT",
         "http://superadmin.DOMAIN:PROXY_PORT",
         ...existing entries...
     ]
 }
 ```
 
-### 6.2 Platform environment.json (SPA API URLs)
+**Why:** These URIs are seeded into the OpenIddict database. If the proxy URL is not listed, SuperAdmin will reject the login redirect with an "invalid redirect_uri" error.
+
+### 8.3 Platform environment.json (SPA API URLs)
 
 **File:** `backend/axm.platform/wwwroot/environments/environment.json`
 
 The Platform SPA uses these URLs for API calls. When accessing through the proxy, they must point to the proxy URLs:
 
-| Field | Value |
-|-------|-------|
-| `apiUrl` | `http://axm.DOMAIN:PROXY_PORT` |
-| `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| `apiVnHost` | `http://vnhost.DOMAIN:PROXY_PORT` |
+| Field | Value | Why |
+|-------|-------|-----|
+| `apiUrl` | `http://axm.DOMAIN:PROXY_PORT` | Where the SPA sends Platform API requests. |
+| `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | Where the SPA redirects for login ("Get started" button). |
+| `apiVnHost` | `http://vnhost.DOMAIN:PROXY_PORT` | Where the SPA sends VnHost API requests. |
 
-### 6.3 SuperAdmin environment.json (SPA API URLs)
+**Why:** If these still point to `localhost`, the SPA will try to call `localhost` from the client's browser, which will fail because the backends are on the server, not the client.
+
+### 8.4 SuperAdmin environment.json (SPA API URLs)
 
 **File:** `backend/axm.superadmin/wwwroot/web/environments/environment.json`
 
-| Field | Value |
-|-------|-------|
-| `apiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| `axManagerUrl` | `http://axm.DOMAIN:PROXY_PORT` |
+| Field | Value | Why |
+|-------|-------|-----|
+| `apiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | SuperAdmin SPA API calls. |
+| `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | SuperAdmin SPA auth requests. |
+| `axManagerUrl` | `http://axm.DOMAIN:PROXY_PORT` | Link back to Platform from the SuperAdmin UI. |
 
-### 6.4 SuperAdmin appsettings.Development.json (CORS + OpenIddict)
+### 8.5 SuperAdmin appsettings.Development.json (CORS + OpenIddict)
 
 **File:** `backend/axm.superadmin/appsettings.Development.json`
 
@@ -456,8 +481,8 @@ The Platform SPA uses these URLs for API calls. When accessing through the proxy
 ```json
 "Cors": {
     "AllowedOrigins": [
-        "http://localhost:50001",
-        "http://localhost:50000",
+        "http://localhost:SUPERADMIN_PORT",
+        "http://localhost:PLATFORM_PORT",
         "http://axm.DOMAIN:PROXY_PORT",
         "http://superadmin.DOMAIN:PROXY_PORT",
         ...existing entries...
@@ -465,49 +490,53 @@ The Platform SPA uses these URLs for API calls. When accessing through the proxy
 }
 ```
 
-**OpenIddict redirect URIs:** Add the proxy URLs to both `RedirectUris` and `PostLogoutRedirectUris` for `axm.webapp` and `axm.superadmin.webapp`:
+**Why:** The browser enforces CORS. When the Platform SPA (loaded from `http://axm.DOMAIN:PROXY_PORT`) makes API calls to SuperAdmin (`http://superadmin.DOMAIN:PROXY_PORT`), SuperAdmin must include that origin in its `Access-Control-Allow-Origin` response header. If the origin is not in `AllowedOrigins`, the browser blocks the request.
+
+**OpenIddict redirect URIs:** Add the proxy URLs to both `RedirectUris` and `PostLogoutRedirectUris` for each client:
 
 ```json
 "axm.webapp": {
     "RedirectUris": [
-        "http://localhost:50000",
+        "http://localhost:PLATFORM_PORT",
         "http://axm.DOMAIN:PROXY_PORT",
         ...existing entries...
     ],
     "PostLogoutRedirectUris": [
-        "http://localhost:50000",
+        "http://localhost:PLATFORM_PORT",
         "http://axm.DOMAIN:PROXY_PORT",
         ...existing entries...
     ]
 },
 "axm.superadmin.webapp": {
     "RedirectUris": [
-        "http://localhost:50001",
+        "http://localhost:SUPERADMIN_PORT",
         "http://superadmin.DOMAIN:PROXY_PORT",
         ...existing entries...
     ],
     "PostLogoutRedirectUris": [
-        "http://localhost:50001",
+        "http://localhost:SUPERADMIN_PORT",
         "http://superadmin.DOMAIN:PROXY_PORT",
         ...existing entries...
     ]
 }
 ```
 
-### 6.5 Platform appsettings.{Edition}.json (Auth authority)
+**Why:** OpenIddict validates that the `redirect_uri` in the authorization request matches one of the registered URIs. If the proxy URL is missing, login fails with "invalid redirect_uri". `PostLogoutRedirectUris` controls where the browser goes after logout.
 
-**File:** `backend/axm.platform/appsettings.Plus.json` (or whichever edition: `Lite`, `Classic`, `Advanced`)
+### 8.6 Platform appsettings (Authority + BaseUrl)
 
-The Platform backend uses `Authority` and `BaseUrl` to build login/authorize redirect URLs. If these point to `localhost`, the "Get started" button will redirect to `localhost` instead of the proxy URL.
+**File:** `backend/axm.platform/appsettings.{Edition}.json` (e.g. `appsettings.Plus.json`)
 
-| Field | Value |
-|-------|-------|
-| `AxmAuthentication.Authority` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
+| Field | Value | Why |
+|-------|-------|-----|
+| `AxmAuthentication.Authority` | `http://superadmin.DOMAIN:PROXY_PORT` | The Platform backend uses this to build the OpenID Connect authorization URL. This is where "Get started" ultimately redirects. |
+| `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | Used for server-to-server calls from Platform to SuperAdmin. |
 
-### 6.6 AllowedHosts (Platform + SuperAdmin)
+**Why:** If `Authority` still points to `localhost:SUPERADMIN_PORT`, clicking "Get started" will redirect the browser to `localhost:SUPERADMIN_PORT`, which does not exist on the client's machine. The authority **must** be the proxy URL that is reachable from the client's browser.
 
-When the proxy sends the original `Host` header (e.g. `axm.DOMAIN:8080`) instead of `localhost`, ASP.NET/Kestrel may reject the request if `AllowedHosts` is restrictive.
+### 8.7 AllowedHosts (Platform + SuperAdmin)
+
+When the proxy sends the original `Host` header (e.g. `axm.DOMAIN:PROXY_PORT`) instead of `localhost`, ASP.NET/Kestrel may reject the request with a 400 Bad Request if `AllowedHosts` is restrictive.
 
 **File:** `backend/axm.platform/appsettings.Development.json`
 **File:** `backend/axm.superadmin/appsettings.Development.json`
@@ -523,25 +552,26 @@ Add to each file (top level):
 
 Use semicolons to separate entries. Include both with and without the port.
 
-### Configuration checklist
+**Note:** If your proxy sends `Host: localhost` to the backend (see section 7.3), this step may not be necessary, but it is good practice to include the hostnames regardless.
 
-| File | Field(s) | What to set |
-|------|----------|-------------|
-| `data.json` | `openIdApplications.axm.webapp.redirectUris` | Add `http://axm.DOMAIN:PROXY_PORT` |
-| `data.json` | `openIdApplications.axm.superadmin.webapp.redirectUris` | Add `http://superadmin.DOMAIN:PROXY_PORT` |
-| Platform `environment.json` | `apiUrl`, `authApiUrl`, `apiVnHost` | Proxy URLs |
-| SuperAdmin `environment.json` | `apiUrl`, `authApiUrl`, `axManagerUrl` | Proxy URLs |
-| SuperAdmin `appsettings.Development.json` | `Cors.AllowedOrigins` | Add proxy origins |
-| SuperAdmin `appsettings.Development.json` | `OpenIddict` RedirectUris + PostLogoutRedirectUris | Add proxy URLs |
-| Platform `appsettings.{Edition}.json` | `AxmAuthentication.Authority`, `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| Platform `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) |
-| SuperAdmin `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) |
+### 8.8 Configuration checklist
+
+| File | Field(s) | What to set | Why |
+|------|----------|-------------|-----|
+| `data.json` | `openIdApplications.*.redirectUris` | Add proxy URLs | Login redirect URI validation |
+| Platform `environment.json` | `apiUrl`, `authApiUrl`, `apiVnHost` | Proxy URLs | SPA API calls and login redirect |
+| SuperAdmin `environment.json` | `apiUrl`, `authApiUrl`, `axManagerUrl` | Proxy URLs | SPA API calls and Platform link |
+| SuperAdmin `appsettings.Development.json` | `Cors.AllowedOrigins` | Add proxy origins | Browser CORS enforcement |
+| SuperAdmin `appsettings.Development.json` | OpenIddict `RedirectUris` + `PostLogoutRedirectUris` | Add proxy URLs | Login/logout redirect validation |
+| Platform `appsettings.{Edition}.json` | `AxmAuthentication.Authority`, `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | "Get started" redirect target |
+| Platform `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) | Kestrel host filtering |
+| SuperAdmin `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) | Kestrel host filtering |
 
 > **Important:** After changing any `appsettings` or `environment.json` file, **restart the corresponding AXM application** for changes to take effect.
 
 ---
 
-## 7. Windows Firewall
+## 9. Windows Firewall
 
 The server must allow inbound connections on the proxy port. By default, Windows Firewall blocks unsolicited inbound TCP connections.
 
@@ -563,9 +593,9 @@ In an **Administrator** PowerShell:
 New-NetFirewallRule -DisplayName "AXM Proxy PROXY_PORT" -Direction Inbound -Protocol TCP -LocalPort PROXY_PORT -Action Allow -Profile Any
 ```
 
-Replace `PROXY_PORT` with your port (e.g. `8080`).
+Replace `PROXY_PORT` with your port.
 
-Using `-Profile Any` ensures the rule applies regardless of network profile (Public, Private, or Domain). If you prefer to restrict it, use `-Profile Private,Domain` (but make sure your network is not set to Public).
+Using `-Profile Any` ensures the rule applies regardless of network profile. If you prefer to restrict it, use `-Profile Private,Domain` (but make sure your network is not set to Public).
 
 ### Verify
 
@@ -576,248 +606,167 @@ Get-NetFirewallRule -DisplayName "AXM Proxy PROXY_PORT" | Select-Object DisplayN
 ### GUI alternative
 
 1. Open **Windows Defender Firewall with Advanced Security** (`wf.msc`).
-2. **Inbound Rules** -> **New Rule...**.
-3. **Port** -> Next -> **TCP**, Specific local ports: `PROXY_PORT` -> Next.
-4. **Allow the connection** -> Next.
-5. Check appropriate profiles -> Next.
-6. Name: e.g. "AXM Proxy 8080" -> Finish.
+2. **Inbound Rules** → **New Rule...**.
+3. **Port** → Next → **TCP**, Specific local ports: `PROXY_PORT` → Next.
+4. **Allow the connection** → Next.
+5. Check appropriate profiles → Next.
+6. Name: e.g. "AXM Proxy" → Finish.
 
 ---
 
-## 8. Starting the services
+## 10. Starting and verifying
 
-Start in this order: AXM backends first, then the proxy, then DNS (if using CoreDNS).
+### 10.1 Start order
 
-### 8.1 Start the AXM bundle
+Start in this order:
 
-Use the bundle launcher (e.g. `axm.exe`, `dotnet run`, or however the bundle is started at your site). Verify the backends are listening:
+1. **AXM backends** — SuperAdmin first, then Platform, then remaining services.
+2. **Reverse proxy.**
+3. **DNS server** (if using a dedicated DNS server).
+
+### 10.2 Verify backends are running
 
 ```powershell
-netstat -ano | findstr "50000 50001 50002"
+netstat -ano | findstr "PLATFORM_PORT SUPERADMIN_PORT VNHOST_PORT"
 ```
 
 You should see `LISTENING` entries for each port.
 
-### 8.2 Start the reverse proxy
+### 10.3 Verify DNS resolution
 
-**nginx example:**
-
-```powershell
-cd C:\nginx
-.\nginx.exe
-```
-
-Verify:
-
-```powershell
-netstat -ano | findstr "PROXY_PORT"
-```
-
-Should show `0.0.0.0:PROXY_PORT  LISTENING`. If it shows `127.0.0.1`, the proxy is only accessible locally; check the config.
-
-**IIS:** Start the site in IIS Manager or restart the app pool.
-
-### 8.3 Start CoreDNS (if using Option B)
-
-In an **Administrator** PowerShell:
-
-```powershell
-cd C:\coredns
-.\coredns.exe -conf Corefile
-```
-
-Verify:
-
-```powershell
-nslookup axm.DOMAIN 127.0.0.1
-```
-
-Should return `SERVER_IP`.
-
----
-
-## 9. Client device setup
-
-What each client device needs depends on the DNS option chosen in section 4.
-
-### If using hosts files (Option A)
-
-Edit the hosts file on **each client device** as described in section 4A.
-
-### If using CoreDNS or client's own DNS (Option B or C)
-
-- If CoreDNS is the DNS server and devices get DNS via DHCP pointing to `SERVER_IP`, no per-device setup is needed.
-- If DNS is manual, set each device's DNS to the DNS server that has the records.
-
-### Per-OS instructions
-
-**Windows:**
-
-1. Press **Win+R**, type `ncpa.cpl`, press Enter.
-2. Right-click active adapter -> Properties.
-3. Select **Internet Protocol Version 4 (TCP/IPv4)** -> Properties.
-4. **Use the following DNS server addresses**: Preferred = `SERVER_IP` (or your DNS server). Alternate = `8.8.8.8` (optional fallback).
-5. OK -> OK.
-
-**Mac:**
-
-System Preferences -> Network -> adapter -> DNS -> add `SERVER_IP`.
-
-**Linux:**
-
-Edit `/etc/resolv.conf` or use NetworkManager to set DNS to `SERVER_IP`.
-
-**iPhone:**
-
-Settings -> Wi-Fi -> tap (i) next to the network -> Configure DNS -> Manual -> add `SERVER_IP`.
-
-**Android:**
-
-Settings -> Wi-Fi -> long-press network -> Modify -> Advanced -> IP settings -> Static -> DNS 1 = `SERVER_IP`.
-
-### Browser considerations
-
-Some browsers (Chrome, Edge) use "Secure DNS" / "DNS over HTTPS" by default, which bypasses local DNS. If the browser cannot resolve your hostnames:
-
-- **Chrome:** Settings -> Privacy and security -> Security -> Use secure DNS -> **Off** (or set to your DNS provider).
-- **Edge:** Settings -> Privacy, search, and services -> Security -> Use secure DNS -> **Off**.
-- **Firefox:** Settings -> Privacy & Security -> DNS over HTTPS -> **Off**.
-
----
-
-## 10. Verification and testing
-
-Run these checks in order. If a step fails, fix it before proceeding.
-
-### Step 1: DNS resolution
-
-On a **client device**:
+From a **client device**:
 
 ```powershell
 ping axm.DOMAIN
 ```
 
-- Should show `SERVER_IP` and get replies.
-- If "could not find host": DNS is not working (check section 4).
-- If IP is correct but "request timed out": network/firewall issue (check section 7).
+Should show `SERVER_IP` and get replies.
 
-### Step 2: Port connectivity
+- If "could not find host": DNS is not working (check section 6).
+- If IP is correct but "request timed out": network or firewall issue (check section 9).
 
-On a **client device** (replace IP and port):
+### 10.4 Verify proxy connectivity
+
+From a **client device**:
 
 ```powershell
 Test-NetConnection -ComputerName SERVER_IP -Port PROXY_PORT
 ```
 
-- `TcpTestSucceeded : True` -> proxy is reachable.
-- `TcpTestSucceeded : False` -> firewall blocking, proxy not running, or network issue. Check section 7 and section 8.
+- `TcpTestSucceeded : True` → proxy is reachable.
+- `TcpTestSucceeded : False` → firewall blocking, proxy not running, or network issue.
 
-### Step 3: Browser access
+### 10.5 Verify browser access
 
 Open in a browser:
 
-- `http://axm.DOMAIN:PROXY_PORT` -> should load the Platform UI.
-- `http://superadmin.DOMAIN:PROXY_PORT` -> should load the SuperAdmin UI.
-- `http://vnhost.DOMAIN:PROXY_PORT` -> should load VnHost (if running).
+- `http://axm.DOMAIN:PROXY_PORT` → should load the Platform UI.
+- `http://superadmin.DOMAIN:PROXY_PORT` → should load the SuperAdmin UI.
+- `http://vnhost.DOMAIN:PROXY_PORT` → should load VnHost.
 
-If you get a **502 Bad Gateway**: the proxy is working but the backend on that port is not running. Start the backend (section 8.1).
-
-If you get the **nginx default page** or "Welcome to nginx": the proxy is not using the AXM config. Check that `axm.conf` is included and nginx was restarted.
-
-### Step 4: Authentication flow
+### 10.6 Verify authentication flow
 
 1. Open `http://axm.DOMAIN:PROXY_PORT`.
-2. Click **Get started** (or the login button).
+2. Click **Get started**.
+3. The browser should redirect to `http://superadmin.DOMAIN:PROXY_PORT/login?ReturnUrl=...`.
+4. After logging in, you should return to `http://axm.DOMAIN:PROXY_PORT`.
 
-If clicking "Get started" does nothing (no redirect):
-- Check `environment.json` (section 6.2): `authApiUrl` must point to `http://superadmin.DOMAIN:PROXY_PORT`.
-- Check `appsettings.{Edition}.json` (section 6.5): `Authority` and `BaseUrl` must point to `http://superadmin.DOMAIN:PROXY_PORT`.
-- Restart the Platform after changes.
-
-If the redirect goes to `localhost:50001` instead of the proxy URL:
-- The backend is building URLs using its local address. Update `Authority` and `BaseUrl` (section 6.5) and the `environment.json` files (sections 6.2, 6.3).
-
-If login fails with CORS errors:
-- Check `AllowedOrigins` in SuperAdmin `appsettings.Development.json` (section 6.4).
-- Check that the proxy is sending `X-Forwarded-Host` with the correct host and port.
-
-If login redirects but returns an error about invalid `redirect_uri`:
-- Add the proxy URL to `redirectUris` in `data.json` and in the OpenIddict `RedirectUris` in SuperAdmin `appsettings.Development.json` (sections 6.1, 6.4).
-- Restart SuperAdmin after changes.
+If this flow does not work, see section 12 (Troubleshooting).
 
 ---
 
-## 11. Troubleshooting
+## 11. Client device setup
+
+What each client device needs depends on the DNS approach chosen in section 6.
+
+### If using hosts files
+
+Edit the hosts file on **each client device** as described in section 6.1.
+
+### If using network-wide DNS
+
+If DNS is handled by the network (Active Directory, router, or a dedicated DNS server), no per-device DNS setup is needed. Devices that get DNS via DHCP will resolve the hostnames automatically.
+
+If DNS is set manually on each device, point the device's DNS to the server that has the records.
+
+### Per-OS quick reference
+
+**Windows:**
+
+1. Press **Win+R**, type `ncpa.cpl`, press Enter.
+2. Right-click active adapter → Properties.
+3. Select **Internet Protocol Version 4 (TCP/IPv4)** → Properties.
+4. **Use the following DNS server addresses**: Preferred = DNS server IP. Alternate = `8.8.8.8` (optional fallback).
+5. OK → OK.
+
+**Mac:**
+
+System Preferences → Network → adapter → DNS → add the DNS server IP.
+
+**Linux:**
+
+Edit `/etc/resolv.conf` or use NetworkManager to set DNS.
+
+**iPhone:**
+
+Settings → Wi-Fi → tap (i) next to the network → Configure DNS → Manual → add the DNS server IP.
+
+**Android:**
+
+Settings → Wi-Fi → long-press network → Modify → Advanced → IP settings → Static → DNS 1 = DNS server IP.
+
+### Browser considerations
+
+Some browsers use "Secure DNS" / "DNS over HTTPS" by default, which bypasses local DNS and hosts files. If the browser cannot resolve your hostnames:
+
+- **Chrome:** Settings → Privacy and security → Security → Use secure DNS → **Off** (or set to your DNS provider).
+- **Edge:** Settings → Privacy, search, and services → Security → Use secure DNS → **Off**.
+- **Firefox:** Settings → Privacy & Security → DNS over HTTPS → **Off**.
+
+---
+
+## 12. Troubleshooting
 
 ### DNS issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "This site can't be reached" / DNS_PROBE_FINISHED_NXDOMAIN | Hostname not in DNS or hosts file | Add hosts entry or DNS record (section 4) |
-| `nslookup` works but browser does not | Browser using Secure DNS / DoH | Disable Secure DNS in browser settings (section 9) |
-| CoreDNS: "bind: permission denied" | Port 53 needs Administrator | Run PowerShell as Administrator |
-| CoreDNS: "bind: address already in use" | Another DNS service on port 53 | Stop the conflicting service (e.g. Windows DNS Client) or use a different port |
+| "This site can't be reached" / DNS_PROBE_FINISHED_NXDOMAIN | Hostname not in DNS or hosts file | Add hosts entry or DNS record (section 6) |
+| `nslookup` works but browser does not | Browser using Secure DNS / DoH | Disable Secure DNS in browser settings (section 11) |
+| DNS server: "permission denied" on port 53 | Port 53 needs Administrator | Run the DNS server as Administrator |
+| DNS server: "address already in use" on port 53 | Another DNS service on port 53 | Stop the conflicting service or use a different port |
 
 ### Proxy issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | 502 Bad Gateway | Backend not running on that port | Start the AXM application; verify with `netstat` |
-| 404 Not Found (from nginx) | Old nginx process with stale config | Kill all nginx (`taskkill /IM nginx.exe /F`) and restart |
-| nginx won't start | Port already in use or config syntax error | Run `nginx.exe -t` to test config; check `logs\error.log` |
-| Default page instead of AXM | `axm.conf` not included or hostname mismatch | Check `nginx.conf` has `include axm.conf;` and `server_name` matches your hostname exactly |
-| Connection refused on PROXY_PORT | Proxy not running or firewall blocking | Check `netstat` for LISTENING; check firewall rule (section 7) |
+| 404 Not Found from the proxy | Proxy not configured for that hostname, or stale configuration | Check proxy config and restart the proxy |
+| Default page instead of AXM | Proxy misconfiguration; hostname not matching any rule | Verify the proxy's hostname routing matches your chosen hostnames exactly |
+| Connection refused on PROXY_PORT | Proxy not running or firewall blocking | Check `netstat` for LISTENING; check firewall rule (section 9) |
+| Proxy only on 127.0.0.1 | Proxy bound to localhost only | Reconfigure to listen on `0.0.0.0:PROXY_PORT` |
 
-### Authentication / redirect issues
+### Authentication and redirect issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Get started" does nothing | `authApiUrl` or `Authority` still points to localhost | Update `environment.json` and `appsettings.{Edition}.json` (sections 6.2, 6.5); restart |
-| Redirect goes to `localhost:50001` | Backend builds URLs using local address | Update `Authority` and `BaseUrl` in `appsettings.{Edition}.json` (section 6.5); restart |
-| CORS error in browser console | Proxy origin not in `AllowedOrigins` | Add `http://axm.DOMAIN:PROXY_PORT` and `http://superadmin.DOMAIN:PROXY_PORT` to CORS config (section 6.4); restart SuperAdmin |
-| "invalid redirect_uri" after login | Proxy URL not in `redirectUris` | Add to `data.json` and OpenIddict config (sections 6.1, 6.4); restart SuperAdmin |
-| Kestrel rejects request (400 Bad Request) | `Host` header not in `AllowedHosts` | Add hostnames to `AllowedHosts` in `appsettings.Development.json` (section 6.6); restart |
+| "Get started" does nothing | `authApiUrl` or `Authority` still points to localhost | Update `environment.json` and `appsettings.{Edition}.json` (sections 8.3, 8.6); restart |
+| Redirect goes to `localhost:SUPERADMIN_PORT` instead of proxy URL | Backend building URLs using its local address | Update `Authority` and `BaseUrl` in `appsettings.{Edition}.json` (section 8.6); restart |
+| CORS error in browser console | Proxy origin not in `AllowedOrigins` | Add proxy origins to CORS config (section 8.5); restart SuperAdmin |
+| "invalid redirect_uri" after login | Proxy URL not in `redirectUris` | Add to `data.json` and OpenIddict config (sections 8.2, 8.5); restart SuperAdmin |
+| 400 Bad Request from Kestrel | `Host` header not in `AllowedHosts` | Add hostnames to `AllowedHosts` (section 8.7); restart the application |
 
 ### Network issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Test-NetConnection` returns False | Firewall, different subnet, or proxy not running | Check firewall rule and network profile (section 7); verify devices are on the same subnet |
-| `ping` times out | Different subnet or no route | Confirm both devices are on the same network; check with `ipconfig` on both |
-| Works on server but not from other devices | Firewall rule missing or wrong profile | Re-create rule with `-Profile Any` (section 7); verify with `Get-NetFirewallRule` |
+| `Test-NetConnection` returns False | Firewall, different subnet, or proxy not running | Check firewall rule and network profile (section 9); verify proxy is running |
+| `ping` shows correct IP but times out | Different subnet or no route | Confirm both devices are on the same network; check with `ipconfig` on both |
+| Works on server but not from other devices | Firewall rule missing or wrong profile | Re-create rule with `-Profile Any` (section 9) |
 
 ---
 
-## 12. Running as Windows services
-
-For production use, run the proxy and DNS server as Windows services so they start automatically at boot.
-
-**NSSM** (Non-Sucking Service Manager) is a simple tool for this:
-
-1. Download from https://nssm.cc/download.
-2. Extract `nssm.exe` (win64 version).
-
-**Install nginx as a service (Administrator PowerShell):**
-
-```powershell
-nssm install nginx "C:\nginx\nginx.exe"
-nssm set nginx AppDirectory "C:\nginx"
-nssm start nginx
-```
-
-**Install CoreDNS as a service (Administrator PowerShell):**
-
-```powershell
-nssm install CoreDNS "C:\coredns\coredns.exe" "-conf" "C:\coredns\Corefile"
-nssm set CoreDNS AppDirectory "C:\coredns"
-nssm start CoreDNS
-```
-
-For full details, see `COREDNS-NGINX-LOCAL-ACCESS.md` in this repo.
-
----
-
-## 13. Summary checklist
+## 13. Deployment checklist
 
 Use this checklist when deploying at a client site. Check off each item as completed.
 
@@ -831,15 +780,17 @@ Use this checklist when deploying at a client site. Check off each item as compl
 
 ### DNS
 
-- [ ] DNS method chosen: Hosts file / CoreDNS / Client DNS
-- [ ] DNS records or hosts entries created for all hostnames -> SERVER_IP
+- [ ] DNS method chosen: Hosts file / DNS server / Existing infrastructure
+- [ ] DNS records or hosts entries created for all hostnames → SERVER_IP
 - [ ] Verified: `ping axm.DOMAIN` returns SERVER_IP (from server and from a client)
 
 ### Reverse proxy
 
-- [ ] Proxy software installed (nginx / IIS+ARR / other)
-- [ ] Proxy config created with correct hostnames, backend ports, and forwarded headers
-- [ ] Proxy config tested (`nginx -t` or equivalent)
+- [ ] Proxy software installed and configured
+- [ ] Proxy routes by Host header to the correct backend ports
+- [ ] Proxy sends forwarded headers (`X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-For`)
+- [ ] Proxy supports WebSockets (`Upgrade` and `Connection` headers forwarded)
+- [ ] Proxy timeout set to a high value for WebSocket connections
 - [ ] Proxy started and listening on PROXY_PORT (`netstat` shows `0.0.0.0:PROXY_PORT LISTENING`)
 
 ### AXM bundle configuration
@@ -848,7 +799,7 @@ Use this checklist when deploying at a client site. Check off each item as compl
 - [ ] Platform `environment.json`: `apiUrl`, `authApiUrl`, `apiVnHost` set to proxy URLs
 - [ ] SuperAdmin `environment.json`: `apiUrl`, `authApiUrl`, `axManagerUrl` set to proxy URLs
 - [ ] SuperAdmin `appsettings.Development.json`: proxy origins added to CORS `AllowedOrigins`
-- [ ] SuperAdmin `appsettings.Development.json`: proxy URLs added to OpenIddict RedirectUris and PostLogoutRedirectUris
+- [ ] SuperAdmin `appsettings.Development.json`: proxy URLs added to OpenIddict `RedirectUris` and `PostLogoutRedirectUris`
 - [ ] Platform `appsettings.{Edition}.json`: `Authority` and `BaseUrl` set to `http://superadmin.DOMAIN:PROXY_PORT`
 - [ ] Platform `appsettings.Development.json`: `AllowedHosts` includes all hostnames
 - [ ] SuperAdmin `appsettings.Development.json`: `AllowedHosts` includes all hostnames
