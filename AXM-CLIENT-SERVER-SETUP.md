@@ -1,6 +1,14 @@
 # AXM Client-Server Environment Setup Guide
 
-Comprehensive guide for deploying AXM on a Windows server and making it accessible to LAN clients by hostname through a reverse proxy. Written for SimonsVoss engineers deploying at client sites and for client IT administrators.
+**AXM (Platform & SuperAdmin) — Reverse Proxy & DNS**
+
+*Setup Guide for Windows Server deployment*
+
+INTERNAL — SimonsVoss Technologies GmbH
+
+---
+
+This guide describes how to deploy AXM on a Windows server and make it accessible to LAN clients by hostname through a reverse proxy. It covers DNS configuration, reverse proxy requirements, AXM bundle configuration (SuperAdmin `appsettings.json`, environment files), Windows Firewall, and client device setup. Written for SimonsVoss engineers deploying at client sites and for client IT administrators.
 
 ---
 
@@ -47,10 +55,9 @@ The following placeholders are used throughout this guide. **Replace them with y
 | `DOMAIN` | The domain suffix for your hostnames | `lan`, `local`, `company.internal` |
 | `SERVER_IP` | The server's static LAN IPv4 address | `192.168.1.100` |
 | `PROXY_PORT` | The port the reverse proxy listens on | `8080` |
-| `PLATFORM_PORT` | Port for AXM Platform (check `data.json`) | `50000` |
-| `SUPERADMIN_PORT` | Port for SuperAdmin (check `data.json`) | `50001` |
-| `VNHOST_PORT` | Port for VnHost (check `data.json`) | `50002` |
-| `COMMNODE_PORT` | Port for CommNode (check `data.json`) | `60123` |
+| `PLATFORM_PORT` | Port for AXM Platform (see `data.json`, informational only) | `50000` |
+| `SUPERADMIN_PORT` | Port for SuperAdmin (see `data.json`, informational only) | `50001` |
+| `VNHOST_PORT` | Port for VnHost (see `data.json`, informational only) | `50002` |
 
 ---
 
@@ -91,7 +98,7 @@ The launcher executable is separate from this folder. It reads `data.json` to fi
 | **CommNode** (`axm.commnode`) | 60123 | Communication node for device communication. |
 | **VirtualCommNode** (`axm.virtualcommnode`) | 60124 | Virtual communication node. |
 
-Ports are defined in `data.json` at the bundle root. **Always check this file for actual values**; they may differ per installation.
+Ports are defined in `data.json` at the bundle root. **Use this file only to read the actual values**; URL and OpenID-related settings are configured in the application `appsettings.json` files, not in `data.json`.
 
 ### 2.3 Key configuration files
 
@@ -101,23 +108,20 @@ Each backend application has its own configuration files. The following are the 
 
 | File | Purpose |
 |------|---------|
-| `data.json` | Edition, environment, application list, ports, and OpenID client definitions (including `redirectUris`). |
+| `data.json` | Edition, environment, application list, and ports (informational only; do not edit URLs or OpenID client settings here). |
 
 **Platform** (`backend/axm.platform/`):
 
 | File | Purpose |
 |------|---------|
-| `appsettings.json` | Base configuration. |
-| `appsettings.{Edition}.json` | Edition-specific settings (e.g. `appsettings.Plus.json`). Contains `AxmAuthentication.Authority` and `SUP.BaseUrl` which control where the "Get started" button redirects. |
-| `appsettings.Development.json` | Development/override settings. Contains `AllowedHosts`. |
+| `appsettings.json` | Base configuration, including `AxmAuthentication.Authority` and `SUP.BaseUrl` which control where the "Get started" button redirects. |
 | `wwwroot/environments/environment.json` | SPA configuration: `apiUrl`, `authApiUrl`, `apiVnHost`. The Angular frontend uses these URLs for all API calls. |
 
 **SuperAdmin** (`backend/axm.superadmin/`):
 
 | File | Purpose |
 |------|---------|
-| `appsettings.json` | Base configuration. |
-| `appsettings.Development.json` | Contains CORS `AllowedOrigins`, OpenIddict `RedirectUris` and `PostLogoutRedirectUris`, and `AllowedHosts`. |
+| `appsettings.json` | Base configuration. Contains CORS `AllowedOrigins`, OpenIddict `RedirectUris` and `PostLogoutRedirectUris`, and `AllowedHosts`. This is the primary file you edit for AXM URL and OpenID configuration. |
 | `wwwroot/web/environments/environment.json` | SPA configuration: `apiUrl`, `authApiUrl`, `axManagerUrl`. |
 
 ### 2.4 Startup order and dependencies
@@ -149,7 +153,6 @@ Client browser
     |    axm.DOMAIN         --> http://127.0.0.1:PLATFORM_PORT    (Platform)
     |    superadmin.DOMAIN   --> http://127.0.0.1:SUPERADMIN_PORT  (SuperAdmin)
     |    vnhost.DOMAIN       --> http://127.0.0.1:VNHOST_PORT      (VnHost)
-    |    commnode.DOMAIN     --> http://127.0.0.1:COMMNODE_PORT    (CommNode)
     v
 [AXM backend applications on localhost]
 ```
@@ -186,10 +189,10 @@ This flow depends on several settings being consistent:
 
 | What controls it | Setting | Must point to |
 |-----------------|---------|---------------|
-| Where "Get started" redirects | Platform `appsettings.{Edition}.json` → `AxmAuthentication.Authority` | `http://superadmin.DOMAIN:PROXY_PORT` |
+| Where "Get started" redirects | Platform `appsettings.json` → `AxmAuthentication.Authority` | `http://superadmin.DOMAIN:PROXY_PORT` |
 | Where the SPA sends auth requests | Platform `environment.json` → `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` |
-| Which redirect URIs are accepted | SuperAdmin `appsettings.Development.json` → OpenIddict `RedirectUris` | Must include `http://axm.DOMAIN:PROXY_PORT` |
-| Which origins are allowed (CORS) | SuperAdmin `appsettings.Development.json` → `Cors.AllowedOrigins` | Must include `http://axm.DOMAIN:PROXY_PORT` |
+| Which redirect URIs are accepted | SuperAdmin `appsettings.json` → OpenIddict `RedirectUris` | Must include `http://axm.DOMAIN:PROXY_PORT` |
+| Which origins are allowed (CORS) | SuperAdmin `appsettings.json` → `Cors.AllowedOrigins` | Must include `http://axm.DOMAIN:PROXY_PORT` |
 
 If any of these do not match, the login flow will break — the redirect will go to the wrong URL, the redirect URI will be rejected, or the browser will block the request due to CORS.
 
@@ -234,7 +237,7 @@ Each AXM application gets its own hostname. All hostnames point to the same serv
 
 **Rules:**
 
-1. **One hostname per application.** Platform, SuperAdmin, VnHost (and CommNode if used) each need a distinct hostname.
+1. **One hostname per application.** Platform, SuperAdmin, and VnHost each need a distinct hostname.
 2. **All hostnames resolve to the same server IP.** The proxy distinguishes them by the `Host` header, not by IP.
 3. **Pick a proxy port** (e.g. `8080`). All hostnames share this port. Avoid port 80 if another service already uses it.
 4. **Be consistent.** Use the same hostnames everywhere: DNS, proxy config, AXM config files, browser URLs.
@@ -273,21 +276,16 @@ Clients must be able to resolve your chosen hostnames to `SERVER_IP`. Choose the
 
 Edit the hosts file on **each device** (including the server itself) that needs to access AXM.
 
+> The hostnames used in this guide (for example `axm.demo`, `app.axm.demo`, `admin.axm.demo`, `vnhost.axm.demo`) are **fictive example domains**. Replace them with hostnames that are valid in your environment.
+
 **Windows** (run Notepad as Administrator):
 
 1. Open `C:\Windows\System32\drivers\etc\hosts` (set file filter to "All Files").
 2. Add one line:
    ```
-   SERVER_IP    axm.DOMAIN superadmin.DOMAIN vnhost.DOMAIN commnode.DOMAIN
+   SERVER_IP    axm.DOMAIN superadmin.DOMAIN vnhost.DOMAIN
    ```
 3. Save and close.
-
-**Mac / Linux** (run as root or with sudo):
-
-```bash
-sudo nano /etc/hosts
-# Add the same line, save.
-```
 
 ### 6.2 Network-wide DNS
 
@@ -298,7 +296,6 @@ If the environment has existing DNS (Active Directory, Windows Server DNS, route
 | `axm.DOMAIN` | A | `SERVER_IP` |
 | `superadmin.DOMAIN` | A | `SERVER_IP` |
 | `vnhost.DOMAIN` | A | `SERVER_IP` |
-| `commnode.DOMAIN` | A | `SERVER_IP` |
 
 If no existing DNS infrastructure is available, a lightweight DNS server can be run on the AXM server itself. It should:
 
@@ -345,7 +342,6 @@ Each hostname maps to a different backend port on `127.0.0.1`:
 | `axm.DOMAIN` | `http://127.0.0.1:PLATFORM_PORT` |
 | `superadmin.DOMAIN` | `http://127.0.0.1:SUPERADMIN_PORT` |
 | `vnhost.DOMAIN` | `http://127.0.0.1:VNHOST_PORT` |
-| `commnode.DOMAIN` | `http://127.0.0.1:COMMNODE_PORT` |
 
 A default/fallback rule that routes unmatched hostnames to Platform is recommended so that accessing `http://SERVER_IP:PROXY_PORT` directly still works.
 
@@ -358,12 +354,6 @@ The proxy must set the following headers on every request so the backend knows t
 | `X-Forwarded-Host` | Original host and port (e.g. `axm.DOMAIN:PROXY_PORT`) | Backend uses this for redirect URLs, CORS origin checks, and OpenID Connect flows. |
 | `X-Forwarded-Proto` | `http` or `https` (the client's protocol) | Backend knows whether the client connected over HTTP or HTTPS. |
 | `X-Forwarded-For` | Client IP address | Logging and access control. |
-| `Host` | Original hostname (e.g. `axm.DOMAIN:PROXY_PORT`), or `localhost` if the backend only accepts localhost | Kestrel/ASP.NET uses this for URL generation. See note below. |
-
-**Host header note:** By default, AXM's Kestrel server may only accept `Host: localhost`. There are two approaches:
-
-- **Option A:** Send `Host: localhost` to the backend and set `X-Forwarded-Host` to the original hostname. The backend uses `X-Forwarded-Host` for URL generation if forwarded headers middleware is configured.
-- **Option B:** Send the original `Host` header and add all hostnames to `AllowedHosts` in the backend's `appsettings` (see section 8.7).
 
 ### 7.4 WebSocket support
 
@@ -422,31 +412,44 @@ When a user clicks "Get started" on the Platform, the following happens:
 
 **If any URL in this chain does not match the proxy URL, the flow breaks.** This is why every configuration change in this section matters.
 
-### 8.2 data.json (OpenID redirect URIs)
+### 8.2 SuperAdmin appsettings.json (OpenID redirect URIs)
 
-**File:** `data.json`
-**Section:** `openIdApplications`
+**File:** `backend/axm.superadmin/appsettings.json`
 
-Add the proxy URLs to `redirectUris` so the OpenID Connect flow accepts them:
+Add the proxy URLs to the OpenIddict client registrations so the OpenID Connect flow accepts them:
 
 ```json
-"axm.webapp": {
-    "redirectUris": [
+"OpenIddict": {
+  "AppRegistrations": {
+    "axm.webapp": {
+      "RedirectUris": [
         "http://localhost:PLATFORM_PORT",
-        "http://axm.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ]
-},
-"axm.superadmin.webapp": {
-    "redirectUris": [
+        "http://axm.DOMAIN:PROXY_PORT"
+        // ...existing entries...
+      ],
+      "PostLogoutRedirectUris": [
+        "http://localhost:PLATFORM_PORT",
+        "http://axm.DOMAIN:PROXY_PORT"
+        // ...existing entries...
+      ]
+    },
+    "axm.superadmin.webapp": {
+      "RedirectUris": [
         "http://localhost:SUPERADMIN_PORT",
-        "http://superadmin.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ]
+        "http://superadmin.DOMAIN:PROXY_PORT"
+        // ...existing entries...
+      ],
+      "PostLogoutRedirectUris": [
+        "http://localhost:SUPERADMIN_PORT",
+        "http://superadmin.DOMAIN:PROXY_PORT"
+        // ...existing entries...
+      ]
+    }
+  }
 }
 ```
 
-**Why:** These URIs are seeded into the OpenIddict database. If the proxy URL is not listed, SuperAdmin will reject the login redirect with an "invalid redirect_uri" error.
+**Why:** These URIs are validated by OpenIddict at runtime. If the proxy URLs are not listed, SuperAdmin will reject the login redirect with an "invalid redirect_uri" error or fail to return to the correct URL after logout.
 
 ### 8.3 Platform environment.json (SPA API URLs)
 
@@ -472,9 +475,9 @@ The Platform SPA uses these URLs for API calls. When accessing through the proxy
 | `authApiUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | SuperAdmin SPA auth requests. |
 | `axManagerUrl` | `http://axm.DOMAIN:PROXY_PORT` | Link back to Platform from the SuperAdmin UI. |
 
-### 8.5 SuperAdmin appsettings.Development.json (CORS + OpenIddict)
+### 8.5 SuperAdmin appsettings.json (CORS)
 
-**File:** `backend/axm.superadmin/appsettings.Development.json`
+**File:** `backend/axm.superadmin/appsettings.json`
 
 **CORS:** Add the proxy origins to `AllowedOrigins`:
 
@@ -490,42 +493,11 @@ The Platform SPA uses these URLs for API calls. When accessing through the proxy
 }
 ```
 
-**Why:** The browser enforces CORS. When the Platform SPA (loaded from `http://axm.DOMAIN:PROXY_PORT`) makes API calls to SuperAdmin (`http://superadmin.DOMAIN:PROXY_PORT`), SuperAdmin must include that origin in its `Access-Control-Allow-Origin` response header. If the origin is not in `AllowedOrigins`, the browser blocks the request.
-
-**OpenIddict redirect URIs:** Add the proxy URLs to both `RedirectUris` and `PostLogoutRedirectUris` for each client:
-
-```json
-"axm.webapp": {
-    "RedirectUris": [
-        "http://localhost:PLATFORM_PORT",
-        "http://axm.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ],
-    "PostLogoutRedirectUris": [
-        "http://localhost:PLATFORM_PORT",
-        "http://axm.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ]
-},
-"axm.superadmin.webapp": {
-    "RedirectUris": [
-        "http://localhost:SUPERADMIN_PORT",
-        "http://superadmin.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ],
-    "PostLogoutRedirectUris": [
-        "http://localhost:SUPERADMIN_PORT",
-        "http://superadmin.DOMAIN:PROXY_PORT",
-        ...existing entries...
-    ]
-}
-```
-
-**Why:** OpenIddict validates that the `redirect_uri` in the authorization request matches one of the registered URIs. If the proxy URL is missing, login fails with "invalid redirect_uri". `PostLogoutRedirectUris` controls where the browser goes after logout.
+**Why:** The browser enforces CORS. When the Platform SPA (loaded from `http://axm.DOMAIN:PROXY_PORT`) makes API calls to SuperAdmin (`http://superadmin.DOMAIN:PROXY_PORT`), SuperAdmin must include that origin in its `Access-Control-Allow-Origin` response header. If the origin is not in `AllowedOrigins`, the browser blocks the request. OpenIddict uses the same hostnames in `appsettings.json` when validating redirect URIs.
 
 ### 8.6 Platform appsettings (Authority + BaseUrl)
 
-**File:** `backend/axm.platform/appsettings.{Edition}.json` (e.g. `appsettings.Plus.json`)
+**File:** `backend/axm.platform/appsettings.json`
 
 | Field | Value | Why |
 |-------|-------|-----|
@@ -536,36 +508,17 @@ The Platform SPA uses these URLs for API calls. When accessing through the proxy
 
 ### 8.7 AllowedHosts (Platform + SuperAdmin)
 
-When the proxy sends the original `Host` header (e.g. `axm.DOMAIN:PROXY_PORT`) instead of `localhost`, ASP.NET/Kestrel may reject the request with a 400 Bad Request if `AllowedHosts` is restrictive.
-
-**File:** `backend/axm.platform/appsettings.Development.json`
-**File:** `backend/axm.superadmin/appsettings.Development.json`
-
-Add to each file (top level):
-
-```json
-{
-    "AllowedHosts": "localhost;axm.DOMAIN;axm.DOMAIN:PROXY_PORT;superadmin.DOMAIN;superadmin.DOMAIN:PROXY_PORT;vnhost.DOMAIN;vnhost.DOMAIN:PROXY_PORT;commnode.DOMAIN;commnode.DOMAIN:PROXY_PORT",
-    ...rest of file...
-}
-```
-
-Use semicolons to separate entries. Include both with and without the port.
-
-**Note:** If your proxy sends `Host: localhost` to the backend (see section 7.3), this step may not be necessary, but it is good practice to include the hostnames regardless.
+`AllowedHosts` can be left at its default value for most deployments when the proxy sends `Host: localhost` and forwards the original host information via `X-Forwarded-Host` (see section 7.3). You typically do not need to change `AllowedHosts` for the scenario described in this guide.
 
 ### 8.8 Configuration checklist
 
 | File | Field(s) | What to set | Why |
 |------|----------|-------------|-----|
-| `data.json` | `openIdApplications.*.redirectUris` | Add proxy URLs | Login redirect URI validation |
 | Platform `environment.json` | `apiUrl`, `authApiUrl`, `apiVnHost` | Proxy URLs | SPA API calls and login redirect |
 | SuperAdmin `environment.json` | `apiUrl`, `authApiUrl`, `axManagerUrl` | Proxy URLs | SPA API calls and Platform link |
-| SuperAdmin `appsettings.Development.json` | `Cors.AllowedOrigins` | Add proxy origins | Browser CORS enforcement |
-| SuperAdmin `appsettings.Development.json` | OpenIddict `RedirectUris` + `PostLogoutRedirectUris` | Add proxy URLs | Login/logout redirect validation |
-| Platform `appsettings.{Edition}.json` | `AxmAuthentication.Authority`, `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | "Get started" redirect target |
-| Platform `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) | Kestrel host filtering |
-| SuperAdmin `appsettings.Development.json` | `AllowedHosts` | All hostnames (with and without port) | Kestrel host filtering |
+| SuperAdmin `appsettings.json` | `Cors.AllowedOrigins` | Add proxy origins | Browser CORS enforcement |
+| SuperAdmin `appsettings.json` | OpenIddict `RedirectUris` + `PostLogoutRedirectUris` | Add proxy URLs | Login/logout redirect validation |
+| Platform `appsettings.json` | `AxmAuthentication.Authority`, `SUP.BaseUrl` | `http://superadmin.DOMAIN:PROXY_PORT` | "Get started" redirect target |
 
 > **Important:** After changing any `appsettings` or `environment.json` file, **restart the corresponding AXM application** for changes to take effect.
 
@@ -681,39 +634,21 @@ What each client device needs depends on the DNS approach chosen in section 6.
 
 ### If using hosts files
 
-Edit the hosts file on **each client device** as described in section 6.1.
+Edit the hosts file on **each Windows client device** as described in section 6.1.
 
 ### If using network-wide DNS
 
-If DNS is handled by the network (Active Directory, router, or a dedicated DNS server), no per-device DNS setup is needed. Devices that get DNS via DHCP will resolve the hostnames automatically.
+If DNS is handled by the network (Active Directory, Windows Server DNS, or a router), no per-device DNS setup is needed. Devices that get DNS via DHCP will resolve the hostnames automatically.
 
 If DNS is set manually on each device, point the device's DNS to the server that has the records.
 
-### Per-OS quick reference
-
-**Windows:**
+### Windows quick reference
 
 1. Press **Win+R**, type `ncpa.cpl`, press Enter.
-2. Right-click active adapter → Properties.
-3. Select **Internet Protocol Version 4 (TCP/IPv4)** → Properties.
-4. **Use the following DNS server addresses**: Preferred = DNS server IP. Alternate = `8.8.8.8` (optional fallback).
-5. OK → OK.
-
-**Mac:**
-
-System Preferences → Network → adapter → DNS → add the DNS server IP.
-
-**Linux:**
-
-Edit `/etc/resolv.conf` or use NetworkManager to set DNS.
-
-**iPhone:**
-
-Settings → Wi-Fi → tap (i) next to the network → Configure DNS → Manual → add the DNS server IP.
-
-**Android:**
-
-Settings → Wi-Fi → long-press network → Modify → Advanced → IP settings → Static → DNS 1 = DNS server IP.
+2. Right-click the active adapter → **Properties**.
+3. Select **Internet Protocol Version 4 (TCP/IPv4)** → **Properties**.
+4. Select **Use the following DNS server addresses** and set Preferred DNS server to the DNS server IP (for example the AXM server). Optionally set an Alternate DNS server such as `8.8.8.8`.
+5. Click **OK** → **OK**.
 
 ### Browser considerations
 
@@ -750,11 +685,10 @@ Some browsers use "Secure DNS" / "DNS over HTTPS" by default, which bypasses loc
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Get started" does nothing | `authApiUrl` or `Authority` still points to localhost | Update `environment.json` and `appsettings.{Edition}.json` (sections 8.3, 8.6); restart |
-| Redirect goes to `localhost:SUPERADMIN_PORT` instead of proxy URL | Backend building URLs using its local address | Update `Authority` and `BaseUrl` in `appsettings.{Edition}.json` (section 8.6); restart |
+| "Get started" does nothing | `authApiUrl` or `Authority` still points to localhost | Update `environment.json` and `appsettings.json` (sections 8.3, 8.6); restart |
+| Redirect goes to `localhost:SUPERADMIN_PORT` instead of proxy URL | Backend building URLs using its local address | Update `Authority` and `BaseUrl` in `appsettings.json` (section 8.6); restart |
 | CORS error in browser console | Proxy origin not in `AllowedOrigins` | Add proxy origins to CORS config (section 8.5); restart SuperAdmin |
-| "invalid redirect_uri" after login | Proxy URL not in `redirectUris` | Add to `data.json` and OpenIddict config (sections 8.2, 8.5); restart SuperAdmin |
-| 400 Bad Request from Kestrel | `Host` header not in `AllowedHosts` | Add hostnames to `AllowedHosts` (section 8.7); restart the application |
+| "invalid redirect_uri" after login | Proxy URL not in `redirectUris` | Add to OpenIddict client registrations in SuperAdmin `appsettings.json` (sections 8.2, 8.5); restart SuperAdmin |
 
 ### Network issues
 
@@ -774,9 +708,9 @@ Use this checklist when deploying at a client site. Check off each item as compl
 
 - [ ] Server LAN IP noted (`ipconfig`): _______________
 - [ ] IP is static or has a DHCP reservation
-- [ ] Hostnames chosen: axm._______, superadmin._______, vnhost._______, commnode._______
+- [ ] Hostnames chosen: axm._______, superadmin._______, vnhost._______
 - [ ] Proxy port chosen: _______
-- [ ] Backend ports confirmed from `data.json`: Platform _______, SuperAdmin _______, VnHost _______, CommNode _______
+- [ ] Backend ports confirmed from `data.json`: Platform _______, SuperAdmin _______, VnHost _______
 
 ### DNS
 
@@ -795,14 +729,11 @@ Use this checklist when deploying at a client site. Check off each item as compl
 
 ### AXM bundle configuration
 
-- [ ] `data.json`: proxy URLs added to `redirectUris` for `axm.webapp` and `axm.superadmin.webapp`
 - [ ] Platform `environment.json`: `apiUrl`, `authApiUrl`, `apiVnHost` set to proxy URLs
 - [ ] SuperAdmin `environment.json`: `apiUrl`, `authApiUrl`, `axManagerUrl` set to proxy URLs
-- [ ] SuperAdmin `appsettings.Development.json`: proxy origins added to CORS `AllowedOrigins`
-- [ ] SuperAdmin `appsettings.Development.json`: proxy URLs added to OpenIddict `RedirectUris` and `PostLogoutRedirectUris`
-- [ ] Platform `appsettings.{Edition}.json`: `Authority` and `BaseUrl` set to `http://superadmin.DOMAIN:PROXY_PORT`
-- [ ] Platform `appsettings.Development.json`: `AllowedHosts` includes all hostnames
-- [ ] SuperAdmin `appsettings.Development.json`: `AllowedHosts` includes all hostnames
+- [ ] SuperAdmin `appsettings.json`: proxy origins added to CORS `AllowedOrigins`
+- [ ] SuperAdmin `appsettings.json`: proxy URLs added to OpenIddict `RedirectUris` and `PostLogoutRedirectUris`
+- [ ] Platform `appsettings.json`: `Authority` and `BaseUrl` set to `http://superadmin.DOMAIN:PROXY_PORT`
 - [ ] AXM applications restarted after config changes
 
 ### Firewall
